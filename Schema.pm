@@ -6,7 +6,7 @@ use Data::Dumper;
 
 use vars qw($VERSION);
 
-$VERSION = '0.04';
+$VERSION = '0.05';
 
 sub new {
     my $class = shift; $class = ref($class) || $class;
@@ -587,21 +587,31 @@ An alias to the 'new' method. Takes the same arguments, returns the same thing.
 Returns a statement handle object, primed with an SQL query and ready
 for fetchrow calls (see below).
 
-This method takes one hashref as an argument. It must have a 'fields'
-key, which is an arrayref of tables (or fully-qualified, dot-notated
-fields, though it will ignore all but the table part of these) the
-schema will initially select on.
+This method takes one hashref as an argument. It must have a
+'key_table' key, set to a string matching the name of the table that
+the handle will initially select on.
 
-Optionally, you can have a 'where' key, which will be passed on to the
-underlying DBIx::Abstract object, so see that module. Note that this
-key's value needs only to hold the
-
-You can also have a 'key_table' to specify which table's rows will end
-up stuck to the row objects generated from the statement handle's
+Optionally, you can have a 'where' key, whose value will be passed on
+to the underlying DBIx::Abstract object, so see that module's
+documentation for syntax examples. Note that unlike a regular
+DBIx::Abstract call, the 'where' element need not refer to any fields
+within the table set via the 'key_table' key. It should instead be the
+one SQL 'where' clause that will remain constant for the life of this
+one particular schema request.
 
 For example:
  
- $sth = $schema->select({fields=>['product'], where=>{'product.id'=>['<',6]}});
+ $sth = $schema->select({key_table=>'product', where=>{'product.id'=>['<',6]}});
+
+Now this statement handle is ready to tell me about products whose
+'id' field in my table is less than 6. Or, I could have been trickier:
+
+ $sth = $schema->select({key_table=>'product', where=>{'vendor.name'=>'Spumco'}});
+
+This time, the statement handle is primed to tell me about products
+made by Spumco, even though the value 'Spumco' isn't stored within the
+product table. It is in the vendor table, which (behind the scenes)
+shares a relationship of some sort with the product table.
 
 =item opt
 
