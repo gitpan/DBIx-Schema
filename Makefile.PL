@@ -98,7 +98,8 @@ WriteMakefile(
     'PREREQ_PM'     => { 'DBIx::Abstract' => 0.90 },
     'clean'         => {FILES=>'config.pl t/basic.t test.log'},
     'PL_FILES'      => ['t/basic.t.PL', 't/basic.t'],
-    'PM'            => {'Schema.pm'=>'blib/lib/DBIx/Schema.pm'},
+    'PM'            => {'Schema.pm'=>'blib/lib/DBIx/Schema.pm',
+                        'Datadict.pm'=>'blib/lib/DBIx/Datadict.pm'},
     'linkext'       => { LINKTYPE=>'' },
     'dist'          => {'COMPRESS'=>'gzip -9f', 'SUFFIX' => 'gz'},
 

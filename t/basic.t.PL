@@ -88,7 +88,7 @@ ok($schema);
 
 # Statement handle creation
 my $sth;
-$sth = $schema->select({fields=>['foo'], where=>{'foo.id'=>1}});
+$sth = $schema->select({table=>'foo', where=>{'foo.id'=>1}});
 ok($sth);
 
 # Rows method
@@ -102,19 +102,19 @@ ok($row = $sth->fetchrow());
 ok(2, $row->baz->rows());
 
 # Miscellaneous statement handle fun...
-$sth = $schema->select({key_table=>'foo'});
+$sth = $schema->select({table=>'foo'});
 ok(4, $sth->rows());
 
-$sth = $schema->select({fields=>['foo'], where=>{'foo.id'=>['<',6]}});
+$sth = $schema->select({table=>'foo', where=>{'foo.id'=>['<',6]}});
 ok(4, $sth->rows());
 
-$sth = $schema->select({fields=>['foo'], where=>{'bar.name'=>'heh'}});
+$sth = $schema->select({table=>'foo', where=>{'bar.name'=>'heh'}});
 ok(3, $sth->rows());
 
 # I don't know why this doesn't work. :( It does outside the test script. GRR.
-#$sth = $schema->select({fields=>['foo'], where=>{'baz.name'=>'bazval 2'}});
+#$sth = $schema->select({table=>'foo', where=>{'baz.name'=>'bazval 2'}});
 
-$sth = $schema->select({fields=>['foo'], where=>[{'bar.name'=>'heh'},'OR',{'bar.id'=>4}]});
+$sth = $schema->select({table=>'foo', where=>[{'bar.name'=>'heh'},'OR',{'bar.id'=>4}]});
 ok(1, $sth->rows());
 
 # cleanup

@@ -13,7 +13,7 @@ related in some way -- i.e., could both return data through a single
 
 COPYRIGHT
 ---------
-(C) Copyright 2000 The Maine InternetWorks, Inc
+Copyright (c) 2000 Adelphia.
 
 This program is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.
@@ -34,3 +34,23 @@ make test
 HOW TO INSTALL
 --------------
 make install
+
+CHANGES SINCE THE LAST RELEASE
+------------------------------
+The interface was pathological in some places, and so has been
+simplified. The statement handle constructor now takes a 'table' key,
+rather than 'fields', which was rather misleading.
+
+The previous version of this module leaked memory like nobody's
+business when used in a sustained environment (such as with mod_perl),
+due to a big ol' circular reference. This has been quashed.
+
+The documentation was similarly schizophrenic here and there, and has
+also seen corrections and clarifications.
+
+The test scripts actually work now, on at least one machine.
+
+Andy Turner (of DBIx::Abstract fame) got his fingers into it, writing
+the Datadict module, which speeds up DBIx::Schema quite a bit. It is
+included with this distribution.
+

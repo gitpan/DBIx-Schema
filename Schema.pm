@@ -1,14 +1,20 @@
 package DBIx::Schema;
-
 use strict;
 use DBIx::Abstract;
-use Data::Dumper;
+use DBIx::Datadict;
 
 use vars qw($VERSION);
 
-$VERSION = '0.05';
+$VERSION = '0.06';
+
+sub connect {
+    # This is just an alias for new
+    my $self = shift->new(@_);
+    return $self;
+}
 
 sub new {
+    # Create a new object an initialize it
     my $class = shift; $class = ref($class) || $class;
     my $self = {};
 
@@ -21,28 +27,166 @@ sub new {
 }
 
 sub initialize {
+    # Initialize our new object.  Our first parameter should be either
+    # a DBIx::Abstract object or a DBIx::Abstract connect string.  Our
+    # second parameter is a datadict object.  If we aren't given one
+    # then we'll create one using our database object.
+
     my $self = shift;
     if ( (ref($_[0]) eq 'DBIx::Abstract') || (ref($_[0]) eq 'SQL::DBI') ) {
         # We've been passed a legal dbh object
         $self->{'dbh'} = $_[0];
     } else {
         # This ought to be a datasource connect hashref, then
-        $self->{'dbh'} = DBIx::Abstract->connect(@_);
+        $self->{'dbh'} = DBIx::Abstract->connect($_[0]);
     }
-    # Define divers instance variables as hashrefs or arrayrefs
-    $self->{'visited_tables'} = {};
-    $self->{'seen_tables'}= {};
-    $self->{'needed_tables'} = {};
-    $self->{'parent_links'} = [];
-    $self->{'child_links'} = [];
-    $self->{'relation_names'} = {};
+    if ( (ref($_[1]) eq 'DBIx::Datadict') ) {
+        # We've been passed a legal datadict object
+        $self->{'dd'} = $_[1];
+    } else {
+        $self->{'dd'} = DBIx::Datadict->new({dbh=>$self->{'dbh'},preload=>1});
+    }
+    # Define instance variables as hashrefs or arrayrefs
     $self->{'field_names'} = {};
+    $self->{'table_relations'} = {};
+    $self->{'field_table_names'} = {};
+
+    # These seem redundent since they're set in this manor when select
+    # is called.
+    #$self->{'visited_tables'} = {};
+    #$self->{'parent_links'} = [];
+    #$self->{'child_links'} = [];
+    #$self->{'seen_tables'}= {};
+    #$self->{'needed_tables'} = {};
 }
 
-sub connect {
-    # Nyeah.
-    my $self = shift->new(@_);
-    return $self;
+sub select {
+    # This is the primary method to start of using this module.
+    my $self = shift;
+    my ($args) = @_;
+    $self->error("The 'select' method requires a single hashref as an argument.") unless ref($args) eq 'HASH';
+
+    # The limits for the query.  Same format as DBIx::Abstract
+    my $where = $$args{'where'};
+
+    # Clear out our instance variables from prior runs
+    $self->{'visited_tables'} = {};
+    $self->{'parent_links'} = [];
+    $self->{'child_links'} = [];
+    $self->{'seen_tables'} = {};
+    $self->{'needed_tables'} = {};
+
+    # Build list of additional required tables.  This should only be needed
+    # if tables are being used in a way invisible to Schema, like if the
+    # where is a scalar.
+    my @tables;
+    if (ref($$args{'tables'}) eq 'ARRAY') {
+        @tables = @{$$args{'tables'}};
+    } elsif (exists($$args{'tables'}) and !ref($$args{'tables'})) {
+        @tables = split(/\s*,\s*/,$$args{'tables'});
+    }
+
+    # Set our key_table.  The term key_table is an internal one and probably
+    # shouldn't be used by programs using this library.
+    my $key_table = $$args{'key_table'} || $$args{'table'} || $tables[0];
+
+    # If key_table still isn't set by this point, we can't go on.
+    $self->error("Sorry, can't perform a schema select without a key table.  Please pass a 'table' or 'tables' argument.") unless $key_table;
+
+    $self->{'key_table'} = $key_table;
+
+    # These add all the tables that we'll be needing
+    $self->require_tables_from_where($where) if $where;
+    $self->require_tables_from_order($$args{'order'}) if exists($$args{'order'});
+    $self->require_tables($key_table,@tables);
+
+    # It shouldn't be possible to get to this stage without required tables.
+    $self->error("Ack, I don't have any required tables, can't perform schema crawl, glub glub glub.") unless keys(%{$self->{'needed_tables'}});
+
+    # Swim the schema till we find all required tables.
+    $self->schema_crawl($key_table, 0);
+
+    # Create our list of fields.
+    $self->{'fields'} = $self->field_list_generator($key_table);
+
+    my $query = $self->generate_query($args);
+
+    # We now have enough information to do a select.
+    my $dbh = $self->{'dbh'};
+    $dbh->select($query);
+    # Prepare a new statment handle object. This is our return value.
+    my $sth = {};
+    bless ($sth, 'Statement');
+    $sth->{' _dbh'} = $dbh;
+    $sth->{' _dd'} = $self->{'dd'};
+    $sth->{' _key_table'} = $key_table;
+    $sth->{' _schema'} = {%$self};
+    $sth->{' _original_args'} = $args;
+    $sth->fetchrow();
+    # Add it to myself.
+    $self->{'sths'}{$sth} = $sth;
+
+    return $sth;
+    # The database handle is now ready for fetchrowing!
+}
+
+sub count {
+    # This is the primary method to start of using this module.
+    my $self = shift;
+    my ($args) = @_;
+    $self->error("The 'select' method requires a single hashref as an argument.") unless ref($args) eq 'HASH';
+
+    # The limits for the query.  Same format as DBIx::Abstract
+    my $where = $$args{'where'};
+
+    # Clear out our instance variables from prior runs
+    $self->{'visited_tables'} = {};
+    $self->{'parent_links'} = [];
+    $self->{'child_links'} = [];
+    $self->{'seen_tables'} = {};
+    $self->{'needed_tables'} = {};
+
+    # Build list of additional required tables.  This should only be needed
+    # if tables are being used in a way invisible to Schema, like if the
+    # where is a scalar.
+    my @tables;
+    if (ref($$args{'tables'}) eq 'ARRAY') {
+        @tables = @{$$args{'tables'}};
+    } elsif (exists($$args{'tables'}) and !ref($$args{'tables'})) {
+        @tables = split(/\s*,\s*/,$$args{'tables'});
+    }
+
+    # Set our key_table.  The term key_table is an internal one and probably
+    # shouldn't be used by programs using this library.
+    my $key_table = $$args{'key_table'} || $$args{'table'} || $tables[0];
+
+    # If key_table still isn't set by this point, we can't go on.
+    $self->error("Sorry, can't perform a schema select without a key table.  Please pass a 'table' or 'tables' argument.") unless $key_table;
+
+    $self->{'key_table'} = $key_table;
+
+    # These add all the tables that we'll be needing
+    $self->require_tables_from_where($where) if $where;
+    $self->require_tables_from_order($$args{'order'}) if exists($$args{'order'});
+    $self->require_tables($key_table,@tables);
+
+    # It shouldn't be possible to get to this stage without required tables.
+    $self->error("Ack, I don't have any required tables, can't perform schema crawl, glub glub glub.") unless keys(%{$self->{'needed_tables'}});
+
+    # Swim the schema till we find all required tables.
+    $self->schema_crawl($key_table, 0);
+
+    # Create our list of fields.
+    $self->{'fields'} = 'count(*)';
+
+    my $query = $self->generate_query($args);
+    delete($$query{'group'});
+
+    # We now have enough information to do a select.
+    my $dbh = $self->{'dbh'};
+    $dbh->select($query);
+
+    return ($dbh->fetchrow_array())[0];
 }
 
 sub error {
@@ -53,15 +197,7 @@ sub error {
     die "DBIx::Schema error: $message \n";
 }
 
-sub warning {
-    # Report a warning.
-    my $self = shift;
-    my ($message) = @_;
-    # Very simple for now.
-    warn "DBIx::Schema warning: $message \n";
-}
-
-sub require_where {
+sub require_tables_from_where {
     # Because DBIx::Abstract's 'where' clauses can be so joyously recursive,
     # we must crawl though them similarly to extract all the table to which
     # they might refer.
@@ -74,151 +210,46 @@ sub require_where {
     }
     if (ref($where_piece) eq 'HASH') {
         $self->require_tables(keys(%$where_piece));
-        return;
     } elsif (ref($where_piece) eq 'ARRAY') {
         foreach (@$where_piece) {
-            $self->require_where($_, $depth++) if ref($_);
+            $self->require_tables_from_where($_, $depth++) if ref($_);
             # If it's not a ref, it's just a conjunction string, like 'AND'.
         }
     } else {
-        $self->warning("Unable to parse a 'where' piece: $where_piece");
+        $self->warning("Unable to parse a 'where' piece: $where_piece .");
     }
 }
 
-sub select {
-    # A user-invokable method.
-    # A wrapper for a call to DBIx::Abstract, to be honest.
+sub warning {
+    # Report a warning.
     my $self = shift;
-    my ($args) = @_;
-    $self->error("The 'select' method requires a single hashref as an argument.") unless ref($args) eq 'HASH';
-    my $where = $$args{'where'} || '';
-    my $fields = $$args{'tables'} || $$args{'fields'} || '';
-    # $where tells us how to initially build our schema...
-    # $fields is merely a list of which fields to pre-load into the cache
-    # (this is all transparent to the user, however)
-    my $needed_tables = $self->{'needed_tables'};
-    $needed_tables = {};          # clean out previous selects
-
-    # We need to crawl over the tables mentioned in the WHERE _and_ the 
-    # tables mentioned in the FIELDS.
-
-    # Issue: Do we want to allow linkage of allll tables? If no where is
-    # provided? Hmm...
-    my $key_table;
-    unless ($key_table = $$args{'key_table'}) {
-        $key_table = $$fields[0] if $fields;
-    }
-    # If key_table still isn't set by this point, we can't go on.
-    $self->error("Sorry, can't perform a schema select without a key table. You'll have to pass a more specific argument.") unless $key_table;
-
-    $fields = [$key_table] unless $fields;
-
-    $self->require_tables(@$fields) if $fields;
-
-    $self->require_where($where);
-
-    $self->error("Ack, I don't have any required tables, can't perform schema crawl, glub glub glub.") unless keys(%{$self->{'needed_tables'}});
-    $self->schema_crawl($key_table, 0);
-
-    # Hmm.. figure out what fields to select on
-    # $fields is already an arrayref
-    $self->{'selectables'} = $fields;
-    $self->select_all_from_tables();
-    $self->alias_selectables();
-
-    # We now have enough information to do a select.
-    my $dbh = $self->{'dbh'};
-
-    my $query = $self->as_abstract($args);
-    $dbh->select($query);
-    # Prepare a new statment handle object. This is our return value.
-    my $sth = {};
-    bless ($sth, 'Statement');
-    $sth->{' _dbh'} = $dbh;
-    $sth->{' _key_table'} = $key_table;
-    $sth->{' _schema'} = $self;
-    $sth->{' _original_args'} = $args;
-    $sth->fetchrow();
-    return $sth;
-    # The database handle is now ready for fetchrowing!
-}
-
-sub build_select_clauses {
-    # All needed internal variables now have their proper values... let's
-    # start building.
-    my $self = shift;
-    my $fields = join(', ', @{$self->{'selectables'}});
-    my $from = join(', ', keys(%{$self->{'visited_tables'}}));
-    my $joins;
-    my $parents = $self->{'parent_links'};
-    my $children = $self->{'child_links'};
-    if ($parents) {
-        for (my $i=0;$i<scalar(@$parents);$i++) {
-            my $parent_name = $self->field_name($$parents[$i]);
-            my $child_name = $self->field_name($$children[$i]);
-            push (@$joins, "$parent_name = $child_name")  if $parent_name and $child_name;
-        }
-    }
-    return ($fields, $from, $joins);
-}
-
-sub field_name {
-    # Returns the name of a given field id. Uses a cache.
-    my $self = shift;
-    my ($field_id) = @_;
-    my $field_names = $self->{'field_names'};
-    unless (defined($$field_names{$field_id})) {
-        my $dbh = $self->{'dbh'};
-        $dbh->select({fields=>'md_table.name, md_field.name', table=>'md_table, md_field', join=>'md_field.md_table_id = md_table.id', where=>{'md_field.id'=>$field_id}});
-        my ($table, $field) = $dbh->fetchrow_array();
-        $$field_names{$field_id} = "$table.$field";
-    }
-    return $$field_names{$field_id};
-}
-
-sub as_abstract {
-    # Its output is a hashref suitable for passing
-    # to Andy Turner's ubiquitous DBIx::Abstract module.
-    my $self = shift;
-    my ($args) = @_;
-    my $dbh = $self->{'dbh'};
-
-    my ($fields, $tables, $joins) = $self->build_select_clauses();
-    my $query;                    # return value (hashref)
-
-    # mumble...
-    unless (defined($$args{'group'})) {
-        $fields = 'DISTINCT '.$fields;
-    }
-
-    # These three values we always need:
-    $query = {fields=>$fields, table=>$tables, join=>$joins};
-
-    # Now take care of optional, $args-based pieces:
-    $$query{'where'} = $$args{'where'} if defined($$args{'where'});
-    $$query{'order'} = $$args{'order'} if defined($$args{'order'});
-    $$query{'extra'} = $$args{'limit'} if defined($$args{'limit'});
-    $$query{'group'} = $$args{'group'} if defined($$args{'group'});
-
-    return $query;
+    my ($message) = @_;
+    # Very simple for now.
+    warn "DBIx::Schema warning: $message \n";
 }
 
 sub require_tables {
-    # Takes a list of fields, and marks them as needed for our next
-    # metaselect.
-    # Works with both fieldnames and raw tablenames.
-    # Returns the first table it so sets.
+    # Take a list of tables and mark them as needed.
     my $self = shift;
-    my $key_table;
-    my $needed_tables = $self->{'needed_tables'};
-    foreach my $field (@_) {
-        my $table;
-        ($table) = $field =~ /^(.*)\./ if $field =~ /\./; # strip field part, if present
-        $table ||= $field;
-        $$needed_tables{$table} = 0; # Will be 1 when found.
-        $key_table = $table unless $key_table;
+    my(@tables) = @_;
+    foreach my $table (@tables) {
+        # Strip off any field part of this
+        $table =~ s/\.(.*)//g;
+        $self->{'needed_tables'}{$table} = 0; # Will be 1 when found.
     }
-    return $key_table;
+}
+
+sub require_tables_from_order {
+    # Find the tables in the order and require them.
+    my $self = shift;
+    my ($order) = @_;
+    if (ref($order) eq 'ARRAY') {
+        $self->require_tables(@$order);
+    } elsif (!ref($order)) {
+        $self->require_tables(split(/\s*,\s*/,$order));
+    } else {
+        $self->warning("Unable to parse a 'order': $order");
+    }
 }
 
 sub schema_crawl {
@@ -226,8 +257,9 @@ sub schema_crawl {
     # The passed-in parameter is the table it's sitting on now.
     my $self = shift;
     my ($table, $depth, $v_relations, $v_tables, $relation_id) = @_;
+    
     $v_relations ||= [];
-    push @$v_relations, $relation_id if defined($relation_id);
+    push(@$v_relations, $relation_id) if defined($relation_id);
 
     $v_tables ||= {};
     # Make sure we're not spiraling down too deep
@@ -242,12 +274,11 @@ sub schema_crawl {
 
     $$v_tables{$table} = 1;
     my $loser = 0;                # debug
-    # $needed_tables is a hashref whose keys are tables, and values are
+    # $self->{'needed_tables'} is a hashref whose keys are tables, and values are
     # true if they've been traversed and false if they haven't.
-    my $needed_tables = $self->{'needed_tables'};
-    if (exists($$needed_tables{$table})) {
+    if (exists($self->{'needed_tables'}{$table})) {
         # Aha, this table contributes to the goal
-        $$needed_tables{$table} = 1;
+        $self->{'needed_tables'}{$table} = 1;
         foreach (@$v_relations) {
             push (@{$self->{'parent_links'}}, $$_{parent});
             push (@{$self->{'child_links'}}, $$_{child});
@@ -258,7 +289,7 @@ sub schema_crawl {
 
 
         my $all_found = 1;
-        foreach (values(%$needed_tables)) {
+        foreach (values(%{$self->{'needed_tables'}})) {
             if ($_ == 0) {
                 $all_found = 0;
                 last;
@@ -271,8 +302,7 @@ sub schema_crawl {
     # Gather up links.
     
     
-    my $relation_names = $self->{'relation_names'}; # ?? what about THEES
-    my $dbh = $self->{'dbh'};
+    my $dd = $self->{'dd'};
     my @my_relations;
     
     # Skip all this stuff if we've gone through this already.
@@ -280,22 +310,20 @@ sub schema_crawl {
         # OK, it's been cached. Use that copy.
         @my_relations = @$my_relations;
     } else {
-        
-        
-        $dbh->query("select distinct md_relation.id, md_relation.parent, md_relation.child from md_relation, md_field,md_table where md_relation.parent = md_field.id and md_field.md_table_id = md_table.id and md_table.name = '$table'");
-        while (my $data = $dbh->fetchrow_hashref()) {
-            push (@my_relations, [{parent=>$$data{parent}, child=>$$data{child}}, $$data{child}]);
-        }
-        $dbh->query("select distinct md_relation.id, md_relation.parent, md_relation.child from md_relation, md_field,md_table where md_relation.child = md_field.id and md_field.md_table_id = md_table.id and md_table.name = '$table'");
-        while (my $data = $dbh->fetchrow_hashref()) {
-            push (@my_relations, [{parent=>$$data{parent}, child=>$$data{child}}, $$data{parent}]);
+        my $table_info = $dd->lookup_table($table);
+        foreach (values(%{$$table_info{'parent'}})) {
+            if ($dd->lookup_field($$_{'parent'})->{'md_table_id'} == $$table_info{'id'}) {
+                push(@my_relations, [{parent=>$$_{'child'}, child=>$$_{'parent'}}, $$_{'child'}]);
+            } else {
+                push(@my_relations, [{parent=>$$_{'parent'}, child=>$$_{'child'}}, $$_{'parent'}]);
+            }
         }
         # Cache relations.
         $self->{'table_relations'}{$table} = \@my_relations;
     }
-# Loop through this table's links.
+    # Loop through this table's links.
     unless (@my_relations) {
-        next;
+        return;
     }  
     
     foreach (@my_relations) {
@@ -303,7 +331,7 @@ sub schema_crawl {
         # See which table this is from
         my $table;
         unless ($table = $self->{'field_table_names'}{$field_id}) {
-            ($table) = $dbh->query("select distinct md_table.name from md_table, md_field where md_field.md_table_id = md_table.id and md_field.id = $field_id")->fetchrow_array();
+            $table = $self->{'dd'}->lookup_table($self->{'dd'}->lookup_field($field_id)->{'md_table_id'})->{'name'};
             $self->{'field_table_names'}{$field_id} = $table;
         }
         if (exists($self->{'seen_tables'}{$table})) {
@@ -317,54 +345,89 @@ sub schema_crawl {
     }
 }  
 
-sub select_all_from_tables {
-    # Transforgifies list o' requested tables into a list of table.* things
+sub field_list_generator {
+    # Convert table list (stored in selectables) into a list of all the
+    # fields to select with
     my $self = shift;
-    my $selectables = $self->{'selectables'};
-    my %tables;
-    my $output;
-    foreach (@$selectables) {
-        s/^(.*?)\..*/$1/ if /\./;
-        $tables{$_} = 1;
-    }
-    foreach (keys(%tables)) {
-        push @$output, "$_.*";
-    }
-    $self->{'selectables'} = $output;
-}
-
-sub alias_selectables {
-    # tranform selectable fields from "table.field" into
-    # "table.field AS 'table.field'". Note how it expands *s.
-    my $self = shift;
-    my $selectables = $self->{'selectables'};
-    my $output;
-    foreach (@$selectables) {
-        if (/^(.*?).\*$/) {
-            # WOo... gotta expand
-            my $table = $1;
-            my $dbh = $self->{'dbh'};
-            $dbh->select({fields=>'md_field.name',
-                          tables=>'md_field, md_table',
-                          join=>'md_field.md_table_id = md_table.id',
-                          where=>"md_table.name = '$table'"});
-            $self->warning("The table '$table' appears to be bogus.") unless $dbh->rows();
-            while (my ($field) = $dbh->fetchrow_array()) {
-                push @$output, "$table.$field AS '$table.$field'";
+    my(@tables) = @_;
+    my $output = [];
+    foreach my $table (@tables) {
+        my $table_info = $self->{'dd'}->lookup_table($table);
+        if ($table_info) {
+            foreach (keys(%{$table_info->{'field'}})) {
+                push(@$output, "$table.$_ AS '$table.$_'");
             }
         } else {
-            # It's fine as is
-            push @$output, "$_ AS '$_'";
+            $self->error("Unknown table: $table");
         }
     }
-    $self->error("All of your tables are bogus!") unless $output;
-    $self->{'selectables'} = $output;
+    $self->error("All of your tables are bogus!") unless @$output;
+    return $output;
 }
 
-sub opt {
-    # Call through to DBIx::Abstract's opt method.
+sub generate_query {
+    # Generate a query for DBIx::Abstract
     my $self = shift;
-    $self->{'dbh'}->opt(@_);
+    my ($args) = @_;
+    my $parents = $self->{'parent_links'};
+    my $children = $self->{'child_links'};
+    my $joins;
+    my $query;                    # return value (hashref)
+
+    if ($parents) {
+        for (my $i=0;$i<scalar(@$parents);$i++) {
+            my $parent_name = $self->field_name($$parents[$i]);
+            my $child_name = $self->field_name($$children[$i]);
+            push (@$joins, "$parent_name = $child_name")  if $parent_name and $child_name;
+        }
+    }
+
+    # These three values we always need:
+    $query = {
+              fields=>$self->{'fields'},
+              tables=>[keys(%{$self->{'visited_tables'}})],
+              'join'=>$joins,
+              };
+
+    $$args{'group'} ||= [];
+    if (!ref($$args{'group'})) {
+        $$args{'group'} = [split(/\s*,\s*/,$$args{'group'})];
+    } elsif (ref($$args{'group'}) ne 'ARRAY') {
+    	$self->warning("Unparsable group ARRAY");
+    	$$args{'group'} = [];
+    }
+    my @group = @{$$args{'group'}};
+    push(@group,$self->{'key_table'}.'.id');
+
+    # Now take care of optional, $args-based pieces:
+    $$query{'where'} = $$args{'where'} if defined($$args{'where'});
+    $$query{'order'} = $$args{'order'} if defined($$args{'order'});
+    $$query{'extra'} = $$args{'limit'} if defined($$args{'limit'});
+    $$query{'group'} = \@group;
+
+    # Handle extra fields
+    if (defined($$args{'fields'})) {
+        if (ref($$args{'fields'}) eq 'ARRAY') {
+            push(@{$$query{'fields'}},@{$$args{'fields'}});
+        } elsif (!ref($$args{'fields'})) {
+            $$query{'fields'} = join(', ',@{$$query{'fields'}},$$args{'fields'});
+        }
+    }
+
+    return $query;
+}
+
+sub field_name {
+    # Returns the name of a given field id. Uses a cache.
+    my $self = shift;
+    my ($field_id) = @_;
+    my $field_names = $self->{'field_names'};
+    unless (defined($$field_names{$field_id})) {
+        my $field = $self->{'dd'}->lookup_field($field_id);
+        my $table = $self->{'dd'}->lookup_table($$field{'md_table_id'});
+        $$field_names{$field_id} = "$$table{'name'}.$$field{'name'}";
+    }
+    return $$field_names{$field_id};
 }
 
 sub flush_cache {
@@ -372,30 +435,35 @@ sub flush_cache {
     my $self = shift;
     $self->{'table_relations'} = {};
     $self->{'field_table_names'} = {};
+    $self->{'field_names'} = {};
 }
+
+sub DESTROY {
+    # Make sure all surviving statement handles are slain, and
+    # avoid the yuckyness of circular references.
+    my $self = shift;
+    foreach my $possession (qw(sths dbhs)) {
+        foreach (values(%{$self->{$possession}})) {
+            %$_ = ();
+        }
+    }
+}
+
+
 
 #####################################################################
 
 package Row;
 
 use vars qw($AUTOLOAD);
-use Data::Dumper;
 
 sub AUTOLOAD {
-    # Hmm...
     my $self = shift;
     my $name = $AUTOLOAD;
     $name =~ s/.*://;             # strip pacakge name
-    return if $name eq 'DESTROY';   # Yipes!!!
-    # A dumb way...
-    # This is really dumb.
-    my $found_here = 0;
-    foreach (keys(%$self)) {
-        if (/^$name/) {
-            $found_here = 1;
-            last;
-        }
-    }
+
+    return if $name eq 'DESTROY';   # We have no destructor
+
     my $new_sth;
     if ($self->{' _sub_sth'} && $self->{' _sub_sth'}{' _key_table'} eq $name) {
         $new_sth = $self->{' _sub_sth'};
@@ -405,22 +473,31 @@ sub AUTOLOAD {
         my $key_table = $sth->{' _key_table'};
         # Gotta deref & reref the present 'where' to avoid circular reference
         # in the new 'where'...
-        $$args{'where'} = [$$args{'where'}, 'AND', {"$key_table.id"=>$self->{'id'}}];
+        if ($$args{'where'}) {
+            $$args{'where'} = [$$args{'where'}, 'AND', {"$key_table.id"=>$self->{'id'}}];
+        } else {
+            $$args{'where'} = {"$key_table.id"=>$self->{'id'}};
+        }
         $$args{'key_table'} = $name;
         $$args{'fields'} = ["$name.*"];
         #    my $schema = $sth->{'schema'};
-        my $schema = DBIx::Schema->new($sth->{' _dbh'}->clone());
-        
+        my $schema = DBIx::Schema->new($sth->{' _dbh'}->clone(),$sth->{' _dd'});
+        # Hmm... I think limits are causing a problem
+        delete($$args{'limit'});
+        # Store this old schema on the old one
+        $sth->{' _schema'}->{'dbhs'} = $schema;
+
         $new_sth = $schema->select($args);
         $self->{' _sub_sth'} = $new_sth;
     }
+
     return $new_sth;
 }
 
 sub sth {
     my $self = shift;
     # Returns the statement handle from which this row was created.
-    return $self->{' _sth'};
+    return bless($self->{' _sth'}, 'Statement');
 }
 
 #####################################################################
@@ -447,10 +524,9 @@ sub fetchrow {
         bless ($row_obj, 'Row');
         # Stick a copy of the schema object onto the row object.
         # Note the use of somewhat bogus private-variable naming scheme.
-        $row_obj->{' _sth'} = $self;
+        $row_obj->{' _sth'} = {%$self};
         $self->fill_row($row, $row_obj, $self->{' _key_table'});
         # Boy, this is sloppy. Still deciding what to do with these objects.
-        $row_obj->{' _schema'} = $self;
         $self->{' _current_row_obj'} = $row_obj;
         return $last_row_obj;
     } else {
@@ -484,7 +560,9 @@ sub fill_row {
     # the best way to represent it. Hee.
     foreach (keys(%$row)) {
         my ($table, $field) = split(/\./);
-        if ($table eq $key_table) {
+        $table ||='';
+        $field ||= '';
+        if (defined($table) and defined($key_table) and $table eq $key_table) {
             $row_obj->{$field} = $$row{$_};
             $row_obj->{"$table.$field"} = $$row{$_};
         } else {
@@ -500,6 +578,8 @@ sub fill_self {
     my $key_table = $self->{' _key_table'};
     foreach (keys(%$row)) {
         my ($table, $field) = split(/\./);
+        $table ||='';
+        $field ||= '';
         if ($table eq $key_table) {
             $self->{$field} = $$row{$_};
             $self->{"$table.$field"} = $$row{$_};
@@ -519,7 +599,12 @@ DBIx::Schema -- An SQL Abstration layer for working with whole schemas
 
  use Schema;
  my $schema = DBIx::Schema->new({db=>'my_db',user=>'db_user',password=>'gigglesnark'});
- $sth = $schema->select({fields=>['product.*'], where=>{'product.id'=>['<',6]}});
+
+***
+
+ my $schema = DBIx::Schema->new($my_dbix_abstract_handle);
+
+ $sth = $schema->select({table=>'product', where=>{'product.id'=>['<',6]}});
  while (my $row = $sth->fetchrow()) {
    print $row->{'name'}."\n";
    print $row->color->{'name'}."\n";
@@ -566,6 +651,13 @@ these tables inside a given database if they're not already present,
 or rebuild and repopulate them if they are. See its perldocs for more
 information on its usage.
 
+B<Note> that at this time you must name your each of tables' primary
+key column 'id' for md_rip.pl to work, and you also must name columns
+relating to them "${table_name}_id". So a column in the 'foo' table
+relating to the 'baz' table's primary key must be named 'baz_id'. Of
+course, it's not a very complicated script, so you can hack it to
+behave differently. :) Future versions will be more flexible.
+
 =head1 METHODS
 
 =head2 Schema handle Methods
@@ -587,37 +679,32 @@ An alias to the 'new' method. Takes the same arguments, returns the same thing.
 Returns a statement handle object, primed with an SQL query and ready
 for fetchrow calls (see below).
 
-This method takes one hashref as an argument. It must have a
-'key_table' key, set to a string matching the name of the table that
-the handle will initially select on.
+This method takes one hashref as an argument. You must specify a table
+that you will be seleting from with the 'table' key.  You can specify
+multiple tables by using the 'tables' key instead.  You should only
+need to specify a 'tables' key if you are using a table that is
+invisible to schema (for instance, if it is in a scalar where).
 
-Optionally, you can have a 'where' key, whose value will be passed on
-to the underlying DBIx::Abstract object, so see that module's
-documentation for syntax examples. Note that unlike a regular
-DBIx::Abstract call, the 'where' element need not refer to any fields
-within the table set via the 'key_table' key. It should instead be the
-one SQL 'where' clause that will remain constant for the life of this
-one particular schema request.
+Optionally, you can have a 'where' key, which will be passed on to the
+underlying DBIx::Abstract object, so see that module. Note that this
+key's value needs only to hold the limit on results, the aspect of the
+where necessary to join tables will be generated by schema for you.
 
 For example:
- 
- $sth = $schema->select({key_table=>'product', where=>{'product.id'=>['<',6]}});
 
-Now this statement handle is ready to tell me about products whose
-'id' field in my table is less than 6. Or, I could have been trickier:
+ $sth = $schema->select({table=>'product', where=>{'product.id'=>['<',6]}});
 
- $sth = $schema->select({key_table=>'product', where=>{'vendor.name'=>'Spumco'}});
+You can also specify a list of fields to be included beyond the normal
+ones.  This allows you to do some special things like:
 
-This time, the statement handle is primed to tell me about products
-made by Spumco, even though the value 'Spumco' isn't stored within the
-product table. It is in the vendor table, which (behind the scenes)
-shares a relationship of some sort with the product table.
-
-=item opt
-
-This method's arguments get passed along to the internal
-DBIx::Abstract object's opt method (see that module's docs for usage
-information). Useful for logging and debugging.
+ $sth = $schema->select({
+     table=>'product',
+     fields=>[
+         'lower(substring(product.name,1,1)) as 'product.letter',
+         'substring(product.description,1,50) as 'product.shortdesc',
+         ],
+     where=>{'product.id'=>['<',6']},
+     });
 
 =item flush_cache
 
@@ -694,7 +781,7 @@ For example:
  # I already have a $schema object defined.
  # I'll make a simple statement handle.
 
- $sth = $schema->select({fields=>['product'], where=>{'product.price'=>['<',6]}});
+ $sth = $schema->select({table=>'product', where=>{'product.price'=>['<',6]}});
  # OK, $sth is now primed to return all products costing less than
  # $6.00.
  
@@ -751,11 +838,11 @@ http://www.jmac.org/projects/DBIx-Schema/
 
 =head1 VERSION
 
-This documentation corresponds with version 0.04 of DBIx::Schema.
+This documentation corresponds with version 0.06 of DBIx::Schema.
 
 =head1 COPYRIGHT
 
-This software is copyright (c) 2000 The Maine InterNetworks, Inc.
+This software is copyright (c) 2000 Adelphia.
 
 This program is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.

@@ -2,6 +2,7 @@ Changes
 MANIFEST
 Makefile.PL
 Schema.pm
+Datadict.pm
 t/basic.t.PL
 lib/ExtUtils/PerlPP.pm
 lib/Test.pm
