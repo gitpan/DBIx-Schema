@@ -1,0 +1,5 @@
+Revision history for Perl extension DBIx::Schema.
+
+0.01  Thu Mar 23 11:27:58 2000
+	- original version; created by h2xs 1.19
+

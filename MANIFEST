@@ -1,0 +1,9 @@
+Changes
+MANIFEST
+Makefile.PL
+Schema.pm
+t/basic.t.PL
+lib/ExtUtils/PerlPP.pm
+lib/Test.pm
+md_rip.pl
+README
