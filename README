@@ -35,22 +35,15 @@ HOW TO INSTALL
 --------------
 make install
 
-CHANGES SINCE THE LAST RELEASE
+CHANGES SINCE THE LAST VERSION
 ------------------------------
-The interface was pathological in some places, and so has been
-simplified. The statement handle constructor now takes a 'table' key,
-rather than 'fields', which was rather misleading.
-
-The previous version of this module leaked memory like nobody's
-business when used in a sustained environment (such as with mod_perl),
-due to a big ol' circular reference. This has been quashed.
-
-The documentation was similarly schizophrenic here and there, and has
-also seen corrections and clarifications.
-
-The test scripts actually work now, on at least one machine.
-
-Andy Turner (of DBIx::Abstract fame) got his fingers into it, writing
-the Datadict module, which speeds up DBIx::Schema quite a bit. It is
-included with this distribution.
-
+The module used to choke on databases containing circular relationship
+paths; i.e., allowing two or more different ways to relate tables A
+and B. It now picks the shortest available path (or picks one of the
+shortest and generates a warning if there is a tie). These additional
+checks make its schema-crawling a tad slower, adding about a
+thousandth of a second of CPU time to a simple statement handle
+construction, according to the Benchmark module on my P-266, and more
+time if it has lots of circular paths to walk to choose from (at which
+point I question your database design philosophy anyway ;-) ), but I
+consider this a reasonable cost for fixing this yucky bug.

@@ -5,7 +5,7 @@ use DBIx::Datadict;
 
 use vars qw($VERSION);
 
-$VERSION = '0.06';
+$VERSION = '0.07';
 
 sub connect {
     # This is just an alias for new
@@ -13,11 +13,14 @@ sub connect {
     return $self;
 }
 
+sub version {
+    return $VERSION;
+}
+
 sub new {
     # Create a new object an initialize it
     my $class = shift; $class = ref($class) || $class;
     my $self = {};
-
     bless($self, $class);
     if ($self->initialize(@_)) { 
         return $self; 
@@ -51,13 +54,6 @@ sub initialize {
     $self->{'table_relations'} = {};
     $self->{'field_table_names'} = {};
 
-    # These seem redundent since they're set in this manor when select
-    # is called.
-    #$self->{'visited_tables'} = {};
-    #$self->{'parent_links'} = [];
-    #$self->{'child_links'} = [];
-    #$self->{'seen_tables'}= {};
-    #$self->{'needed_tables'} = {};
 }
 
 sub select {
@@ -104,7 +100,46 @@ sub select {
     $self->error("Ack, I don't have any required tables, can't perform schema crawl, glub glub glub.") unless keys(%{$self->{'needed_tables'}});
 
     # Swim the schema till we find all required tables.
-    $self->schema_crawl($key_table, 0);
+    # A chaaaange. Now we do it once for every needed table.
+    undef($self->{'visited_tables'});
+    foreach my $sought_table (keys(%{$self->{'needed_tables'}})) {
+        $self->{'sought_table'} = $sought_table;
+        undef($self->{'contestants'});
+        $self->schema_crawl($key_table, 0);
+        # Stuff here to choose a winner and put it somehwere.
+        my $shortest_distance;
+        my $winning_path;
+        my $equal_distance_warning = 0;
+        my @equal_distance_contestants = ();
+        foreach my $contestant (@{$self->{'contestants'}}) {
+            if ( (not(defined($shortest_distance))) or ($$contestant{'distance'} < $shortest_distance) ) {
+                $shortest_distance = $$contestant{'distance'};
+                $equal_distance_warning = 0;
+                @equal_distance_contestants = ($contestant);
+                $winning_path = $contestant;
+            } elsif ( (defined($shortest_distance)) and ($shortest_distance == $$contestant{'distance'}) ) {
+                $equal_distance_warning = 1;
+                push (@equal_distance_contestants, $contestant);
+            }
+        }
+        if ($equal_distance_warning) {
+            # Uh oh! We have two contestants of the same length which
+            # are both the shortest of the bunch.
+            warn "***Equal distance warning from $key_table to $sought_table!\n";
+#            foreach my $contestant (@equal_distance_contestants) {
+#                warn "---\n";
+#                warn Dumper($contestant);
+#            }
+#            warn "---\n";
+        }
+        my @tables = keys(%{$$winning_path{'visited_tables'}});
+        # AND in the parents and kids this winner found.
+        foreach (qw(parent child)) {
+            push (@{$self->{"${_}_links"}}, @{$$winning_path{"${_}_links"}});
+        }
+        # AND in the tables this winner visited.
+        @{$self->{'visited_tables'}}{keys(%{$$winning_path{'visited_tables'}})} = 1;
+    }
 
     # Create our list of fields.
     $self->{'fields'} = $self->field_list_generator($key_table);
@@ -112,7 +147,7 @@ sub select {
     my $query = $self->generate_query($args);
 
     # We now have enough information to do a select.
-    my $dbh = $self->{'dbh'};
+    my $dbh = $self->{'dbh'}->clone;
     $dbh->select($query);
     # Prepare a new statment handle object. This is our return value.
     my $sth = {};
@@ -183,7 +218,7 @@ sub count {
     delete($$query{'group'});
 
     # We now have enough information to do a select.
-    my $dbh = $self->{'dbh'};
+    my $dbh = $self->{'dbh'}->clone;
     $dbh->select($query);
 
     return ($dbh->fetchrow_array())[0];
@@ -256,12 +291,19 @@ sub schema_crawl {
     # A recursive method for building a path between a bunvh of tables.
     # The passed-in parameter is the table it's sitting on now.
     my $self = shift;
-    my ($table, $depth, $v_relations, $v_tables, $relation_id) = @_;
+    my ($table, $depth, $v_relations, $v_tables, $relation_id, $winners) = @_;
     
     $v_relations ||= [];
     push(@$v_relations, $relation_id) if defined($relation_id);
 
     $v_tables ||= {};
+
+    # We will keep a list of winninginging paths.
+    # Why not make this an object thing? Grah. Grah, I say!
+    # Consistiency. I REALLY WANT TO MAKE THIS MORE OO! OOooOOOooOOooOOO!
+
+    $winners ||= [];
+
     # Make sure we're not spiraling down too deep
     $depth++;
     if ($depth > 25) {
@@ -270,34 +312,45 @@ sub schema_crawl {
     }
 
     # Mark this table as visited.
-    $self->{'seen_tables'}{$table} = 1;
-
     $$v_tables{$table} = 1;
-    my $loser = 0;                # debug
-    # $self->{'needed_tables'} is a hashref whose keys are tables, and values are
-    # true if they've been traversed and false if they haven't.
-    if (exists($self->{'needed_tables'}{$table})) {
-        # Aha, this table contributes to the goal
-        $self->{'needed_tables'}{$table} = 1;
-        foreach (@$v_relations) {
-            push (@{$self->{'parent_links'}}, $$_{parent});
-            push (@{$self->{'child_links'}}, $$_{child});
+
+    # Check if the current table matches that which we seek.
+    if ($self->{'sought_table'} eq $table) {
+        # Why yes, it does!
+        # We will add this to the list of winning paths.
+        my %contestant;         # Not a winner yet. ;)
+        # Drop on some debuggin info
+        $contestant{'sought_table'} = $table;
+        # Initialize this new contestant
+        foreach (qw(parent child)) {
+            $contestant{"${_}_links"} = [];
         }
-        @{$self->{'visited_tables'}}{keys(%$v_tables)} = 1;
-        # Check to see if we're done
-        # I wonder if there's a faster way to do this
-
-
-        my $all_found = 1;
-        foreach (values(%{$self->{'needed_tables'}})) {
-            if ($_ == 0) {
-                $all_found = 0;
-                last;
+        foreach my $relation (@$v_relations) {
+            foreach (qw(parent child)) {
+                push (@{$contestant{"${_}_links"}}, $$relation{$_});
             }
         }
-        if ($all_found) {       # Yay, we are done
-            return 1;
-        }
+        # Mark how far it traveled to get here...
+        $contestant{'distance'} = $depth;
+        # ...and what tables it has visited.
+        @{$contestant{'visited_tables'}}{keys(%$v_tables)} = 1;
+        # OK, store this contestant.
+        push (@{$self->{'contestants'}}, \%contestant);
+
+         # WE NO LONGER NEED TO
+#        # Check to see if we're done
+#        # I wonder if there's a faster way to do this
+#
+#        my $all_found = 1;
+#        foreach (values(%{$self->{'needed_tables'}})) {
+#            if ($_ == 0) {
+#                $all_found = 0;
+#                last;
+#            }
+#        }
+#        if ($all_found) {       # Yay, we are done
+#            return 1;
+#        }
     }
     # Gather up links.
     
@@ -334,7 +387,7 @@ sub schema_crawl {
             $table = $self->{'dd'}->lookup_table($self->{'dd'}->lookup_field($field_id)->{'md_table_id'})->{'name'};
             $self->{'field_table_names'}{$field_id} = $table;
         }
-        if (exists($self->{'seen_tables'}{$table})) {
+        if (exists($$v_tables{$table})) {
             next;
         }
         # Ah, a strange table. Let's dive down a level.
